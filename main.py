@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -22,13 +23,39 @@ ai_client = OpenAI(
 MODEL = "llama-3.1-8b-instant"
 
 
+def handle_personal_memory_command(user_input):
+    text = user_input.strip()
+    lower_text = text.lower()
+
+    name_match = re.match(r"^(?:my name is|i am)\s+(.+?)\.?$", text, re.IGNORECASE)
+    if name_match:
+        name = name_match.group(1).strip()
+        memory.set_user_name(name)
+        return "Nice to meet you, " + name + "."
+
+    if lower_text in {"what is my name", "what's my name", "do you know my name"}:
+        name = memory.get_user_name()
+        if name:
+            return "Your name is " + name + "."
+        return "I do not know your name yet."
+
+    if lower_text in {"what did i ask earlier", "what did i ask before", "what was my last question"}:
+        last_user_message = memory.get_last_user_message()
+        if last_user_message:
+            return "You asked \"" + last_user_message + "\" earlier."
+        return "I do not have any earlier question saved yet."
+
+    return None
+
+
 def ask_model(user_input):
     msgs = []
     msgs.append({
         "role": "system",
         "content": (
             "You are a helpful assistant. "
-            "Use tools when they are useful for the user's request."
+            "Reply normally in plain text. "
+            "Do not output function-call syntax or JSON unless the user explicitly asks for it."
         )
     })
 
@@ -41,49 +68,13 @@ def ask_model(user_input):
     try:
         resp = ai_client.chat.completions.create(
             model=MODEL,
-            messages=msgs,
-            tools=tools.tools_schema
+            messages=msgs
         )
     except Exception as e:
         print("Error: could not reach the API. Details:", e)
         return "Sorry, something went wrong while contacting the AI."
 
     reply = resp.choices[0].message
-
-    while reply.tool_calls:
-        msgs.append(reply)
-
-        for tcall in reply.tool_calls:
-            tname = tcall.function.name
-
-            try:
-                targs = json.loads(tcall.function.arguments or "{}")
-                if not isinstance(targs, dict):
-                    targs = {}
-            except Exception:
-                targs = {}
-
-            try:
-                tresult = tools.run_tool(tname, targs)
-            except Exception as tool_error:
-                tresult = "Error: tool execution failed: " + str(tool_error)
-
-            msgs.append({
-                "role": "tool",
-                "tool_call_id": tcall.id,
-                "content": tresult
-            })
-
-        try:
-            resp = ai_client.chat.completions.create(
-                model=MODEL,
-                messages=msgs,
-                tools=tools.tools_schema
-            )
-            reply = resp.choices[0].message
-        except Exception as e:
-            print("Error: could not reach the API. Details:", e)
-            return "Sorry, something went wrong while contacting the AI after tool execution."
 
     return reply.content or ""
 
@@ -173,9 +164,15 @@ def main():
             print("Goodbye!")
             break
 
+        personal_reply = handle_personal_memory_command(user_input)
+        if personal_reply is not None:
+            print("Assistant:", personal_reply)
+            memory.add_to_memory(user_input, personal_reply)
+            continue
+
         task_reply = handle_task_command(user_input)
         if task_reply is not None:
-            print(task_reply)
+            print("Assistant:", task_reply)
             memory.add_to_memory(user_input, task_reply)
             continue
 
